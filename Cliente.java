@@ -122,8 +122,7 @@ public class Cliente {
                 System.out.println(entry.getKey() + ": " + entry.getValue());
             }
 
-            // Para pruebas, seleccionamos aleatoriamente uno
-            int servicioElegido = 1; // Puedes modificarlo si quieres seleccionar aleatoriamente
+            int servicioElegido = 1; 
             System.out.println("Solicitando servicio con ID: " + servicioElegido);
             out.writeInt(servicioElegido);
 

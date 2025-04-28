@@ -5,8 +5,8 @@ public class TestClienteIterativo {
 
         for (int i = 0; i < cantidadConsultas; i++) {
             System.out.println("==== Consulta #" + (i + 1) + " ====");
-            Cliente.main(null); // Llama a tu Cliente cada vez
-            Thread.sleep(100); // Pequeña pausa de 100 ms entre consultas
+            Cliente.main(null); 
+            Thread.sleep(100); 
         }
     }
 }
