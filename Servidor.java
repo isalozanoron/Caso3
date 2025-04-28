@@ -8,7 +8,6 @@ import javax.crypto.spec.DHParameterSpec;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
-import java.math.BigInteger;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
@@ -60,6 +59,7 @@ public class Servidor {
     }
 
     private static class Delegado implements Runnable {
+        private static int contadorConsultas = 0;
         private final Socket socket;
 
         public Delegado(Socket socket) {
@@ -70,6 +70,11 @@ public class Servidor {
         public void run() {
             try (DataInputStream in = new DataInputStream(socket.getInputStream());
                  DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+
+                synchronized (Servidor.class) {
+                    contadorConsultas++;
+                    System.out.println("\n==== Consulta #" + contadorConsultas + " ====");
+                }
 
                 // Diffie-Hellman
                 AlgorithmParameterGenerator paramGen = AlgorithmParameterGenerator.getInstance("DH");
@@ -110,26 +115,20 @@ public class Servidor {
 
                 SecretKey llaveCifrado = new SecretKeySpec(llaveCifradoBytes, "AES");
 
-                // Firmar tabla
-                long inicioFirma = System.nanoTime();
+                // Serializar tabla
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 ObjectOutputStream oos = new ObjectOutputStream(baos);
                 oos.writeObject(servicios);
                 oos.flush();
                 byte[] tablaBytes = baos.toByteArray();
 
-                byte[] firma = Asimetrico.firmarRSA(tablaBytes, llavePrivada);
-                long finFirma = System.nanoTime();
-                System.out.println("Tiempo de firma (ns): " + (finFirma - inicioFirma));
+                // Medir tiempos
+                medirTiempos(tablaBytes);
 
-                // Cifrar tabla
+                // Flujo normal: enviar IV + tabla cifrada + firma + HMAC
                 IvParameterSpec iv = Simetrico.generarIV();
-                long inicioCifrado = System.nanoTime();
                 byte[] tablaCifrada = Simetrico.cifrarAES(tablaBytes, llaveCifrado, iv);
-                long finCifrado = System.nanoTime();
-                System.out.println("Tiempo de cifrado tabla (ns): " + (finCifrado - inicioCifrado));
-
-                // Calcular HMAC
+                byte[] firma = Asimetrico.firmarRSA(tablaBytes, llavePrivada);
                 byte[] hmacTabla = Digest.calcularHMAC(tablaCifrada, llaveHmacBytes);
 
                 // Enviar IV
@@ -148,13 +147,13 @@ public class Servidor {
                 out.writeInt(hmacTabla.length);
                 out.write(hmacTabla);
 
-                // Recibir identificador
+                // Ahora manejar la solicitud del cliente
                 int idServicio = in.readInt();
                 System.out.println("Cliente pidió servicio: " + idServicio);
 
                 // Buscar servicio
-                int ip = 127001; // Dummy IP (localhost)
-                int puerto = 5001; // Dummy port
+                int ip = 127001; // dummy IP
+                int puerto = 5001; // dummy port
                 if (!servicios.containsKey(idServicio)) {
                     ip = -1;
                     puerto = -1;
@@ -168,14 +167,11 @@ public class Servidor {
                 dosResp.flush();
                 byte[] respuestaBytes = baosResp.toByteArray();
 
-                // Cifrar respuesta
                 IvParameterSpec ivResp = Simetrico.generarIV();
                 byte[] respuestaCifrada = Simetrico.cifrarAES(respuestaBytes, llaveCifrado, ivResp);
-
-                // Calcular HMAC
                 byte[] hmacRespuesta = Digest.calcularHMAC(respuestaCifrada, llaveHmacBytes);
 
-                // Enviar IV de respuesta
+                // Enviar IV respuesta
                 out.writeInt(ivResp.getIV().length);
                 out.write(ivResp.getIV());
 
@@ -183,7 +179,7 @@ public class Servidor {
                 out.writeInt(respuestaCifrada.length);
                 out.write(respuestaCifrada);
 
-                // Enviar HMAC
+                // Enviar HMAC respuesta
                 out.writeInt(hmacRespuesta.length);
                 out.write(hmacRespuesta);
 
@@ -191,6 +187,39 @@ public class Servidor {
                 e.printStackTrace();
             } finally {
                 try { socket.close(); } catch (IOException e) { e.printStackTrace(); }
+            }
+        }
+
+        private void medirTiempos(byte[] tablaBytes) {
+            try {
+                // Tiempo de firma
+                long startTimeFirma = System.nanoTime();
+                Asimetrico.firmarRSA(tablaBytes, llavePrivada);
+                long endTimeFirma = System.nanoTime();
+                long tiempoFirma = (endTimeFirma - startTimeFirma) / 1000000;
+                System.out.println("Tiempo de firma (ms): " + tiempoFirma);
+
+                // Tiempo de cifrado AES
+                IvParameterSpec ivTemp = Simetrico.generarIV();
+                SecretKey llaveTemp = new SecretKeySpec(new byte[32], "AES"); // Dummy key
+                long startTimeAES = System.nanoTime();
+                Simetrico.cifrarAES(tablaBytes, llaveTemp, ivTemp);
+                long endTimeAES = System.nanoTime();
+                long tiempoAES = (endTimeAES - startTimeAES) / 1000000;
+                System.out.println("Tiempo de cifrado AES (ms): " + tiempoAES);
+
+                // Tiempo de cifrado RSA (con datos pequeños)
+                byte[] datosPequenos = new byte[100];
+                new SecureRandom().nextBytes(datosPequenos);
+
+                long startTimeRSA = System.nanoTime();
+                Asimetrico.cifrarRSA(datosPequenos, llavePublica);
+                long endTimeRSA = System.nanoTime();
+                long tiempoRSA = (endTimeRSA - startTimeRSA) / 1000000;
+                System.out.println("Tiempo de cifrado RSA (ms): " + tiempoRSA);
+
+            } catch (Exception e) {
+                System.err.println("Error midiendo tiempos: " + e.getMessage());
             }
         }
     }

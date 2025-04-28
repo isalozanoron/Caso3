@@ -7,15 +7,25 @@ import javax.crypto.Cipher;
 public class Asimetrico {
 
     public static byte[] cifrarRSA(byte[] datos, PublicKey llavePublica) throws Exception {
+        long startTimeRSA = System.nanoTime();
         Cipher cipher = Cipher.getInstance("RSA");
         cipher.init(Cipher.ENCRYPT_MODE, llavePublica);
-        return cipher.doFinal(datos);
+        byte[] encryptedRSA = cipher.doFinal(datos);
+        long endTimeRSA = System.nanoTime();
+        long tiempoCifradoRSA = (endTimeRSA - startTimeRSA) / 1000000;
+        System.out.println("Tiempo de cifrado RSA (ms): " + tiempoCifradoRSA);
+        return encryptedRSA;
     }
 
     public static byte[] descifrarRSA(byte[] datos, PrivateKey llavePrivada) throws Exception {
+        long startTimeRSA = System.nanoTime();
         Cipher cipher = Cipher.getInstance("RSA");
         cipher.init(Cipher.DECRYPT_MODE, llavePrivada);
-        return cipher.doFinal(datos);
+        byte[] encryptedRSA = cipher.doFinal(datos);
+        long endTimeRSA = System.nanoTime();
+        long tiempoDescifradoRSA = (endTimeRSA - startTimeRSA) / 1000000;
+        System.out.println("Tiempo de descifrado RSA (ms): " + tiempoDescifradoRSA);
+        return encryptedRSA;
     }
 
     public static byte[] firmarRSA(byte[] datos, PrivateKey llavePrivada) throws Exception {
