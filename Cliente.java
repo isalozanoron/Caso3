@@ -1,115 +1,178 @@
+import clases.Asimetrico;
+import clases.Digest;
+import clases.Simetrico;
+
+import javax.crypto.KeyAgreement;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.DHParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
-import java.net.*;
+import java.math.BigInteger;
+import java.net.Socket;
 import java.nio.file.Files;
 import java.security.*;
 import java.security.spec.*;
-import java.util.*;
-import javax.crypto.*;
-import javax.crypto.spec.*;
-import javax.crypto.interfaces.*;
+import java.util.Map;
 
 public class Cliente {
 
-    private static PublicKey serverPublicKey;
+    private static PublicKey llavePublicaServidor;
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
+        cargarLlavePublica();
+
+        Socket socket = new Socket("localhost", 5000);
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
         try {
-            serverPublicKey = loadPublicKey("llaves/public.key");
+            // Recibir parámetros Diffie-Hellman
+            int paramLength = in.readInt();
+            byte[] paramBytes = new byte[paramLength];
+            in.readFully(paramBytes);
 
-            Socket socket = new Socket("localhost", 12345);
-            System.out.println("Conectado al servidor");
+            AlgorithmParameters params = AlgorithmParameters.getInstance("DH");
+            params.init(paramBytes);
+            DHParameterSpec dhSpec = params.getParameterSpec(DHParameterSpec.class);
 
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+            // Generar par de llaves DH cliente
+            KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("DH");
+            keyPairGen.initialize(dhSpec);
+            KeyPair keyPair = keyPairGen.generateKeyPair();
 
-            // 1. Recibir parámetros DH y publicKey del servidor
-            DHParameterSpec dhSpec = (DHParameterSpec) in.readObject();
-            PublicKey publicKeyServidor = (PublicKey) in.readObject();
+            // Enviar llave pública
+            out.writeInt(keyPair.getPublic().getEncoded().length);
+            out.write(keyPair.getPublic().getEncoded());
 
-            // 2. Generar par DH usando los mismos parámetros
-            KeyPair clienteDH = KeyExchange.generarParDH(dhSpec);
-            PublicKey publicKeyCliente = clienteDH.getPublic();
-            PrivateKey privateKeyCliente = clienteDH.getPrivate();
+            // Recibir llave pública servidor
+            int serverPubKeyLength = in.readInt();
+            byte[] serverPubKeyBytes = new byte[serverPubKeyLength];
+            in.readFully(serverPubKeyBytes);
 
-            // 3. Enviar publicKey del cliente
-            out.writeObject(publicKeyCliente);
-            out.flush();
+            KeyFactory kf = KeyFactory.getInstance("DH");
+            PublicKey serverPubKey = kf.generatePublic(new X509EncodedKeySpec(serverPubKeyBytes));
 
-            // 4. Derivar llaves de sesión
-            byte[] secretoCompartido = KeyExchange.calcularSecretoCompartido(privateKeyCliente, publicKeyServidor);
-            byte[][] llaves = KeyExchange.derivarLlaves(secretoCompartido);
-            byte[] claveAES = llaves[0];
-            byte[] claveHMAC = llaves[1];
+            // Crear llave compartida
+            KeyAgreement keyAgree = KeyAgreement.getInstance("DH");
+            keyAgree.init(keyPair.getPrivate());
+            keyAgree.doPhase(serverPubKey, true);
 
-            System.out.println("→ Intercambio DH exitoso. Llaves de sesión derivadas.");
+            byte[] sharedSecret = keyAgree.generateSecret();
+            MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
+            byte[] digest = sha512.digest(sharedSecret);
 
-            byte[] iv = (byte[]) in.readObject();
-            byte[] datosCifrados = (byte[]) in.readObject();
-            byte[] firma = (byte[]) in.readObject();
+            byte[] llaveCifradoBytes = new byte[32];
+            byte[] llaveHmacBytes = new byte[32];
+            System.arraycopy(digest, 0, llaveCifradoBytes, 0, 32);
+            System.arraycopy(digest, 32, llaveHmacBytes, 0, 32);
 
-            if (!verificarFirma(datosCifrados, firma, serverPublicKey)) {
-                System.out.println("❌ Error en la consulta: firma inválida.");
+            SecretKey llaveCifrado = new SecretKeySpec(llaveCifradoBytes, "AES");
+
+            // Recibir IV
+            int ivLength = in.readInt();
+            byte[] ivBytes = new byte[ivLength];
+            in.readFully(ivBytes);
+            IvParameterSpec iv = new IvParameterSpec(ivBytes);
+
+            // Recibir tabla cifrada
+            int tablaLength = in.readInt();
+            byte[] tablaCifrada = new byte[tablaLength];
+            in.readFully(tablaCifrada);
+
+            // Recibir firma
+            int firmaLength = in.readInt();
+            byte[] firma = new byte[firmaLength];
+            in.readFully(firma);
+
+            // Recibir HMAC
+            int hmacLength = in.readInt();
+            byte[] hmacRecibido = new byte[hmacLength];
+            in.readFully(hmacRecibido);
+
+            // Validar HMAC
+            long inicioVerificacion = System.nanoTime();
+            byte[] hmacCalculado = Digest.calcularHMAC(tablaCifrada, llaveHmacBytes);
+            if (!MessageDigest.isEqual(hmacCalculado, hmacRecibido)) {
+                System.out.println("Error en la consulta (HMAC inválido). Cerrando conexión.");
                 socket.close();
                 return;
             }
-            System.out.println("✔️ Firma verificada correctamente.");
+            long finVerificacion = System.nanoTime();
+            System.out.println("Tiempo de verificación tabla (ns): " + (finVerificacion - inicioVerificacion));
 
-            byte[] datosDescifrados = descifrarAES(datosCifrados, claveAES, iv);
-            ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(datosDescifrados));
-            Map<Integer, String[]> servicios = (Map<Integer, String[]>) ois.readObject();
+            // Descifrar tabla
+            byte[] tablaBytes = Simetrico.descifrarAES(tablaCifrada, llaveCifrado, iv);
+
+            // Verificar firma
+            boolean firmaValida = Asimetrico.verificarFirmaRSA(tablaBytes, firma, llavePublicaServidor);
+            if (!firmaValida) {
+                System.out.println("Firma inválida. Cerrando conexión.");
+                socket.close();
+                return;
+            }
+
+            // Mostrar servicios
+            ByteArrayInputStream bais = new ByteArrayInputStream(tablaBytes);
+            ObjectInputStream ois = new ObjectInputStream(bais);
+            Map<Integer, String> servicios = (Map<Integer, String>) ois.readObject();
 
             System.out.println("Servicios disponibles:");
-            for (Map.Entry<Integer, String[]> entry : servicios.entrySet()) {
-                System.out.println("ID: " + entry.getKey() +
-                        " | IP: " + entry.getValue()[0] +
-                        " | Puerto: " + entry.getValue()[1]);
+            for (Map.Entry<Integer, String> entry : servicios.entrySet()) {
+                System.out.println(entry.getKey() + ": " + entry.getValue());
             }
 
-            Scanner scanner = new Scanner(System.in);
-            System.out.print("Ingrese el ID del servicio deseado: ");
-            int idSeleccionado = scanner.nextInt();
+            // Para pruebas, seleccionamos aleatoriamente uno
+            int servicioElegido = 1; // Puedes modificarlo si quieres seleccionar aleatoriamente
+            System.out.println("Solicitando servicio con ID: " + servicioElegido);
+            out.writeInt(servicioElegido);
 
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(claveHMAC, "HmacSHA256"));
-            byte[] hmac = mac.doFinal(Integer.toString(idSeleccionado).getBytes());
+            // Recibir IV de respuesta
+            int ivRespLength = in.readInt();
+            byte[] ivRespBytes = new byte[ivRespLength];
+            in.readFully(ivRespBytes);
+            IvParameterSpec ivResp = new IvParameterSpec(ivRespBytes);
 
-            out.writeObject(idSeleccionado);
-            out.writeObject(hmac);
-            out.flush();
+            // Recibir respuesta cifrada
+            int respLength = in.readInt();
+            byte[] respuestaCifrada = new byte[respLength];
+            in.readFully(respuestaCifrada);
 
-            String[] respuesta = (String[]) in.readObject();
-            if (respuesta[0].equals("-1")) {
-                System.out.println("❌ Servicio no encontrado o HMAC inválido.");
-            } else {
-                System.out.println("✅ Dirección del servicio:");
-                System.out.println("IP: " + respuesta[0] + " | Puerto: " + respuesta[1]);
+            // Recibir HMAC de respuesta
+            int hmacRespLength = in.readInt();
+            byte[] hmacRespRecibido = new byte[hmacRespLength];
+            in.readFully(hmacRespRecibido);
+
+            // Validar HMAC de respuesta
+            byte[] hmacRespCalculado = Digest.calcularHMAC(respuestaCifrada, llaveHmacBytes);
+            if (!MessageDigest.isEqual(hmacRespCalculado, hmacRespRecibido)) {
+                System.out.println("Error en la consulta de respuesta (HMAC inválido). Cerrando conexión.");
+                socket.close();
+                return;
             }
 
-            in.close();
-            out.close();
-            socket.close();
+            // Descifrar respuesta
+            byte[] respuestaBytes = Simetrico.descifrarAES(respuestaCifrada, llaveCifrado, ivResp);
+
+            // Interpretar respuesta
+            DataInputStream disResp = new DataInputStream(new ByteArrayInputStream(respuestaBytes));
+            int ip = disResp.readInt();
+            int puerto = disResp.readInt();
+
+            System.out.println("Dirección IP del servicio: " + ip);
+            System.out.println("Puerto del servicio: " + puerto);
 
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            socket.close();
         }
     }
 
-    private static PublicKey loadPublicKey(String filename) throws Exception {
-        byte[] keyBytes = Files.readAllBytes(new File(filename).toPath());
-        X509EncodedKeySpec spec = new X509EncodedKeySpec(keyBytes);
-        return KeyFactory.getInstance("RSA").generatePublic(spec);
-    }
-
-    private static byte[] descifrarAES(byte[] datos, byte[] claveAES, byte[] iv) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(claveAES, "AES"), new IvParameterSpec(iv));
-        return cipher.doFinal(datos);
-    }
-
-    private static boolean verificarFirma(byte[] datos, byte[] firma, PublicKey publicKey) throws Exception {
-        Signature signature = Signature.getInstance("SHA256withRSA");
-        signature.initVerify(publicKey);
-        signature.update(datos);
-        return signature.verify(firma);
+    private static void cargarLlavePublica() throws Exception {
+        byte[] llavePublicaBytes = Files.readAllBytes(new File("public.key").toPath());
+        X509EncodedKeySpec pubSpec = new X509EncodedKeySpec(llavePublicaBytes);
+        KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+        llavePublicaServidor = keyFactory.generatePublic(pubSpec);
     }
 }
